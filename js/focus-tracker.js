@@ -46,14 +46,17 @@ class FocusTracker {
 
     async loadModels() {
         try {
-            // Load face-api.js models
-            await faceapi.nets.tinyFaceDetector.loadFromUri('/node_modules/face-api.js/weights');
-            await faceapi.nets.faceLandmark68Net.loadFromUri('/node_modules/face-api.js/weights');
-            await faceapi.nets.faceRecognitionNet.loadFromUri('/node_modules/face-api.js/weights');
-            await faceapi.nets.faceExpressionNet.loadFromUri('/node_modules/face-api.js/weights');
+            // Load face-api.js models from CDN
+            const modelPath = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights';
+            
+            await faceapi.nets.tinyFaceDetector.loadFromUri(modelPath);
+            await faceapi.nets.faceLandmark68Net.loadFromUri(modelPath);
+            await faceapi.nets.faceRecognitionNet.loadFromUri(modelPath);
+            await faceapi.nets.faceExpressionNet.loadFromUri(modelPath);
             
             this.isInitialized = true;
             this.updateStatus('Ready to start tracking');
+            console.log('Face detection models loaded successfully from CDN');
         } catch (error) {
             console.error('Error loading face detection models:', error);
             this.showError('Face detection models not available. Using alternative tracking method.');
@@ -131,23 +134,54 @@ class FocusTracker {
                     width: { ideal: 640 },
                     height: { ideal: 480 },
                     facingMode: 'user'
-                }
+                },
+                audio: false
             };
 
+            this.updateStatus('Requesting camera access...');
+            
             this.mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+            
             this.video.srcObject = this.mediaStream;
+            console.log('Camera access granted');
             
             // Wait for video to load
-            return new Promise((resolve) => {
+            return new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    reject(new Error('Camera failed to load after 5 seconds'));
+                }, 5000);
+                
                 this.video.onloadedmetadata = () => {
-                    this.video.play();
+                    clearTimeout(timeout);
+                    console.log('Video loaded:', this.video.videoWidth, 'x', this.video.videoHeight);
+                    this.video.play().catch(err => {
+                        console.error('Error playing video:', err);
+                        reject(err);
+                    });
                     this.setupCanvas();
                     resolve();
+                };
+                
+                this.video.onerror = (error) => {
+                    clearTimeout(timeout);
+                    console.error('Video element error:', error);
+                    reject(error);
                 };
             });
             
         } catch (error) {
-            throw new Error('Camera access denied or not available');
+            console.error('Camera error:', error);
+            
+            // Provide specific error messages
+            if (error.name === 'NotAllowedError') {
+                throw new Error('Camera permission denied. Please allow camera access in your browser settings.');
+            } else if (error.name === 'NotFoundError') {
+                throw new Error('No camera found. Please connect a camera and try again.');
+            } else if (error.name === 'NotReadableError') {
+                throw new Error('Camera is being used by another application. Please close other apps using the camera.');
+            } else {
+                throw new Error(`Camera access failed: ${error.message}`);
+            }
         }
     }
 
@@ -168,16 +202,20 @@ class FocusTracker {
 
     async detectFace() {
         try {
-            if (!this.ctx || !this.video) return;
+            if (!this.ctx || !this.video || this.video.readyState !== 4) return;
 
             // Clear canvas
             this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
             
-            // Try to use face-api.js if available
-            if (window.faceapi && faceapi.nets.tinyFaceDetector.isLoaded) {
+            // Check if face-api.js is available and models are loaded
+            const faceAPIAvailable = window.faceapi && 
+                                    faceapi.nets.tinyFaceDetector && 
+                                    faceapi.nets.tinyFaceDetector.isLoaded;
+            
+            if (faceAPIAvailable) {
                 await this.detectWithFaceAPI();
             } else {
-                // Fallback to simpler detection
+                // Fallback: Use video frame analysis
                 this.detectWithFallback();
             }
             
@@ -215,14 +253,48 @@ class FocusTracker {
     }
 
     detectWithFallback() {
-        // Simple motion detection or random simulation for demo
+        // Fallback detection using video frame analysis
         if (!document.hidden && this.video && this.video.readyState === 4) {
-            // Simulate face detection with some randomness
-            const isDetected = Math.random() > 0.1; // 90% chance of "detection"
-            
-            if (isDetected) {
-                this.onFaceDetected();
-            } else {
+            try {
+                // Draw video frame to canvas for analysis
+                this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
+                
+                // Get image data
+                const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+                const data = imageData.data;
+                
+                // Simple motion/presence detection by analyzing brightness
+                let darkPixels = 0;
+                let brightPixels = 0;
+                
+                for (let i = 0; i < data.length; i += 4) {
+                    const r = data[i];
+                    const g = data[i + 1];
+                    const b = data[i + 2];
+                    const brightness = (r + g + b) / 3;
+                    
+                    if (brightness > 150) brightPixels++;
+                    if (brightness < 100) darkPixels++;
+                }
+                
+                const totalPixels = imageData.data.length / 4;
+                const contrastRatio = darkPixels / totalPixels;
+                
+                // If there's reasonable contrast in the image, assume face is present
+                const isDetected = contrastRatio > 0.15 && contrastRatio < 0.85;
+                
+                // Draw a simple rectangle to show video is active
+                this.ctx.strokeStyle = '#ffff00';
+                this.ctx.lineWidth = 2;
+                this.ctx.strokeRect(10, 10, this.canvas.width - 20, this.canvas.height - 20);
+                
+                if (isDetected) {
+                    this.onFaceDetected();
+                } else {
+                    this.onFaceLost();
+                }
+            } catch (error) {
+                console.error('Fallback detection error:', error);
                 this.onFaceLost();
             }
         } else {
